@@ -10,12 +10,15 @@ import {
 } from 'react-native';
 
 import {BleManager, Device, Characteristic} from 'react-native-ble-plx';
+import {pick} from '@react-native-documents/picker';
+import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, bytesToBase64} from './OtapServer';
 
 const manager = new BleManager();
 
-const TARGET_MAC  = '00:60:37:7A:D3:11';
-const TARGET_NAME = 'NXPMPD-0000';
+const TARGET_MAC  = '00:60:37:E2:85:4D';
+const TARGET_NAME = 'LMNP-0000000000';
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
+const SubscribetoUUID = '01ff0101-ba5e-f4ee-5ca1-eb1e5e4b1ce0'
 
 async function requestPermissions() {
   if (Platform.OS === 'android') {
@@ -55,7 +58,14 @@ function App(): React.JSX.Element {
   const [writableChars, setWritableChars] = useState<Characteristic[]>([]);
   const [logs,          setLogs]          = useState<string[]>([]);
 
+  // ---- OTAP-specific state (new, added alongside the existing scanner) ----
+  const [otapFileInfo, setOtapFileInfo] = useState<{name: string; imageId: number; size: number} | null>(null);
+  const [otapProgress, setOtapProgress] = useState(0);
+  const [otapRunning,  setOtapRunning]  = useState(false);
+  const otapImageRef = useRef<OtapImage | null>(null);
+
   const scrollRef = useRef<ScrollView>(null);
+  const connectedDeviceRef = useRef<Device | null>(null);
 
   useEffect(() => {
     requestPermissions();
@@ -129,6 +139,7 @@ function App(): React.JSX.Element {
       addLog(`Device : ${targetDevice.id}`);
 
       const connected = await targetDevice.connect();
+      connectedDeviceRef.current = connected;
       addLog('Connected — discovering services...');
 
       await connected.discoverAllServicesAndCharacteristics();
@@ -159,21 +170,6 @@ function App(): React.JSX.Element {
             found.push(char);
             addLog(`│  ✅ Added to writable list`);
           }
-
-          // Subscribe to notifications/indications automatically
-          if (char.isNotifiable || char.isIndicatable) {
-            addLog(`│  🔔 Subscribing to notifications...`);
-            char.monitor((error, update) => {
-              if (error) {
-                addLog(`NOTIFY ERROR [${char.uuid.slice(0,8)}...] : ${error.message}`);
-                return;
-              }
-              if (update?.value) {
-                const hex = base64ToHex(update.value);
-                addLog(`◀ RX [${char.uuid.slice(0,8)}...] : ${hex}`);
-              }
-            });
-          }
         }
         addLog(`└─────────────────────────────────────`);
       }
@@ -188,6 +184,7 @@ function App(): React.JSX.Element {
         if (error) addLog(`Reason : ${error.message}`);
         setIsConnected(false);
         setWritableChars([]);
+        connectedDeviceRef.current = null;
       });
 
     } catch (error: any) {
@@ -214,6 +211,98 @@ function App(): React.JSX.Element {
       }
     } catch (error: any) {
       addLog(`WRITE ERROR : ${error.message}`);
+    }
+  };
+
+  // ─── DISCONNECT ──────────────────────────────────────────────────────────────
+
+  const disconnectDevice = async () => {
+    try {
+      addLog('══ DISCONNECTING ══════════════════════');
+      await connectedDeviceRef.current?.cancelConnection();
+      // onDisconnected() above handles resetting isConnected/writableChars/ref
+    } catch (error: any) {
+      addLog(`DISCONNECT ERROR : ${error.message}`);
+    }
+  };
+
+  // ─── OTAP: pick firmware file ────────────────────────────────────────────────
+
+  const pickOtapFile = async () => {
+    try {
+      const [result] = await pick({mode: 'open'});
+      if (!result) {
+        return;
+      }
+      if (!result.name?.toLowerCase().endsWith('.bleota')) {
+        addLog(`OTAP: rejected file '${result.name}' - only .bleota files are accepted`);
+        return;
+      }
+      const response = await fetch(result.uri);
+      const buffer = await response.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      const image = new OtapImage(bytes, addLog);
+      otapImageRef.current = image;
+      setOtapFileInfo({name: result.name, imageId: image.imageId, size: image.size});
+      addLog(`OTAP: firmware file parsed OK: ${result.name} imageId=${image.imageId} size=${image.size}`);
+    } catch (err: any) {
+      if (err?.message !== 'User canceled document picker') {
+        addLog(`OTAP: failed to load firmware file: ${err?.message}`);
+      }
+    }
+  };
+
+  // ─── OTAP: trigger OTA mode via Wireless UART ───────────────────────────────
+
+  const runOtapTrigger = async () => {
+    const device = connectedDeviceRef.current;
+    if (!device) {
+      addLog('OTAP: not connected - use Scan + Connect above first, then Trigger.');
+      return;
+    }
+    setOtapRunning(true);
+    addLog('══ OTAP: TRIGGER OTA MODE ════════════');
+    try {
+      addLog(`Writing OTA trigger command to WU characteristic: ${WU_OTA_TRIGGER_CMD.reduce((s, b) => s + b.toString(16).padStart(2, '0') + ' ', '').trim()}`);
+      await device.writeCharacteristicWithoutResponseForService(
+        SERVICE_WU,
+        CHAR_WU_WRITE,
+        bytesToBase64(WU_OTA_TRIGGER_CMD),
+      );
+      addLog('OTAP: trigger sent - device should reboot into OTA mode.');
+    } catch (err: any) {
+      addLog(`OTAP ERROR : ${err?.message}`);
+    } finally {
+      setOtapRunning(false);
+    }
+  };
+
+  // ─── OTAP: run the firmware transfer ─────────────────────────────────────────
+
+  const runOtapUpdate = async () => {
+    if (!otapImageRef.current) {
+      addLog('OTAP: no firmware file loaded');
+      return;
+    }
+    setOtapRunning(true);
+    setOtapProgress(0);
+    addLog('══ OTAP: START FIRMWARE UPDATE ═══════');
+    try {
+      const server = new OtapServer({
+        manager,
+        image: otapImageRef.current,
+        useWirelessUart: false, // trigger is the separate manual step above
+        log: addLog,
+        onProgress: (sent, total) => {
+          setOtapProgress(total > 0 ? Math.round((sent * 100) / total) : 0);
+        },
+      });
+      const ok = await server.run();
+      addLog(ok ? 'OTAP: update complete.' : 'OTAP: update failed.');
+    } catch (err: any) {
+      addLog(`OTAP ERROR : ${err?.message}`);
+    } finally {
+      setOtapRunning(false);
     }
   };
 
@@ -249,17 +338,22 @@ function App(): React.JSX.Element {
           )}
 
           {isConnected && (
-            <View style={{flex: 1}}>
-              <Text style={{
-                textAlign: 'center',
-                color: 'white',
-                backgroundColor: '#2e7d32',
-                padding: 8,
-                borderRadius: 4,
-              }}>
-                Connected 🔗
-              </Text>
-            </View>
+            <>
+              <View style={{flex: 1}}>
+                <Text style={{
+                  textAlign: 'center',
+                  color: 'white',
+                  backgroundColor: '#2e7d32',
+                  padding: 8,
+                  borderRadius: 4,
+                }}>
+                  Connected 🔗
+                </Text>
+              </View>
+              <View style={{flex: 1}}>
+                <Button title="Disconnect" onPress={disconnectDevice} color="#c62828" />
+              </View>
+            </>
           )}
         </View>
 
@@ -276,7 +370,48 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-        {/* Log Panel */}
+        {/* ── OTAP section (new, added alongside the existing scanner) ── */}
+        <View style={{
+          marginBottom: 12,
+          padding: 10,
+          borderWidth: 1,
+          borderColor: '#ddd',
+          borderRadius: 8,
+          gap: 6,
+        }}>
+          <Text style={{fontSize: 12, fontWeight: 'bold', color: '#555', marginBottom: 2}}>
+            OTAP FIRMWARE UPDATE
+          </Text>
+
+          <Button
+            title="1. Trigger OTA Mode (WU)"
+            onPress={runOtapTrigger}
+            disabled={otapRunning}
+          />
+
+          <Button
+            title="2. Pick Firmware File (.bleota)"
+            onPress={pickOtapFile}
+            disabled={otapRunning}
+          />
+          {otapFileInfo && (
+            <Text style={{fontSize: 11, color: '#666'}}>
+              Loaded: {otapFileInfo.name} — imageId={otapFileInfo.imageId}, size={otapFileInfo.size} bytes
+            </Text>
+          )}
+
+          <Button
+            title="3. Start Firmware Update (OTAP)"
+            onPress={runOtapUpdate}
+            disabled={otapRunning || !otapFileInfo}
+          />
+          <View style={{height: 6, backgroundColor: '#eee', borderRadius: 3, overflow: 'hidden'}}>
+            <View style={{height: '100%', width: `${otapProgress}%`, backgroundColor: '#2563eb'}} />
+          </View>
+          <Text style={{fontSize: 11, color: '#666'}}>{otapProgress}%</Text>
+        </View>
+
+        {/* Log Panel (shared by both the scanner and OTAP flow) */}
         <View style={{
           flex: 1,
           backgroundColor: '#0d0d0d',
