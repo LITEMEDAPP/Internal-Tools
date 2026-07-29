@@ -360,12 +360,18 @@ export class OtapServer {
       seq += 1;
       this.totalSent += payload.length;
       this.onProgress(Math.min(this.totalSent, image.size), image.size);
+
+      // Pace the writes - firing "write without response" packets back-to-back
+      // with no delay can overflow Android's internal BLE write queue, which
+      // causes a silent disconnect (no JS-catchable error) once the buffer
+      // fills up - typically around the same data volume every time. This
+      // small pause gives the radio time to actually drain each packet.
+      await new Promise((r) => setTimeout(r, 15));
     }
     const pct = (100 * Math.min(this.totalSent, image.size)) / image.size;
     this.log(`  ${this.totalSent}/${image.size} bytes (${pct.toFixed(1)} %)`);
   }
 
-  
   /** Scans for a device advertising the given service UUID, mirroring BleakScanner.find_device_by_filter(). */
   private scanForDevice(serviceUuid: string, timeoutMs: number): Promise<Device | null> {
     return new Promise((resolve) => {
@@ -397,4 +403,4 @@ export class OtapServer {
       });
     });
   }
-} 
+}
