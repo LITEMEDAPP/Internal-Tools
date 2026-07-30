@@ -1,0 +1,51 @@
+| Software            | Version           |
+| ------------------- | ----------------- |
+| Node.js             | >=22.11.0         |
+| npm                 | Latest compatible |
+| React               | 19.2.3            |
+| React Native        | 0.86.0            |
+| Android Studio      | Latest            |
+| Android SDK         | API Level 36      |
+| Android Build Tools | 36.0.0            |
+| Android NDK         | 27.1.12297006     |
+| Java JDK            | OpenJDK 17        |
+| Gradle              | 9.x               |
+| Git                 | Latest            |
+| Visual Studio Code  | Recommended       |
+
+
+Project Dependencies:
+
+react 19.2.3
+react-native 0.86.0
+react-native-ble-plx 3.5.1
+@react-native-documents/picker 12.0.2
+react-native-safe-area-context 5.5.2
+@react-native/new-app-screen 0.86.0
+
+Android Configuration:
+
+Compile SDK : 36
+Target SDK  : 36
+Minimum SDK : 24
+Build Tools : 36.0.0
+NDK Version : 27.1.12297006
+Kotlin      : 2.1.20
+Hermes       : Enabled
+New Architecture : Enabled
+
+Installation:
+
+git clone https://github.com/LITEMEDAPP/Internal-Tools.git
+
+cd Internal-Tools
+
+npm install
+
+cd android
+
+./gradlew clean
+
+cd ..
+
+npx react-native run-android

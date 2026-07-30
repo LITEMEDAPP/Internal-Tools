@@ -322,12 +322,17 @@ function App(): React.JSX.Element {
 
   return (
     <SafeAreaView style={{flex: 1, backgroundColor: '#121417'}}>
-      <View style={{flex: 1, paddingHorizontal: 16, paddingTop: 32, paddingBottom: 16}}>
+      <View style={{flex: 1, padding: 16}}>
 
         {/* Header */}
-        <Text style={{fontSize: 16, fontWeight: 'bold', marginBottom: 12, color: '#e6edf3'}}>
-          BLE — {TARGET_NAME}
-        </Text>
+        <View style={{marginBottom: 12}}>
+          <Text style={{fontSize: 17, fontWeight: '500', letterSpacing: 3, color: '#e6edf3', textTransform: 'uppercase'}}>
+            Curapod
+          </Text>
+          <Text style={{fontSize: 9, letterSpacing: 2, color: '#8b949e', textTransform: 'uppercase', marginTop: 2}}>
+            OTA Server
+          </Text>
+        </View>
 
         {/* Controls */}
         <View style={{flexDirection: 'row', gap: 8, marginBottom: 12}}>
@@ -336,7 +341,7 @@ function App(): React.JSX.Element {
               title={scanning ? 'Scanning...' : 'Scan'}
               onPress={scanDevices}
               disabled={scanning || isConnected}
-              color="#238636"
+              color="#338e45"
             />
           </View>
 
@@ -402,14 +407,14 @@ function App(): React.JSX.Element {
             title="1. Trigger OTA Mode (WU)"
             onPress={runOtapTrigger}
             disabled={otapRunning}
-            color="#8957e5"
+            color="#1f6d74"
           />
 
           <Button
             title="2. Pick Firmware File (.bleota)"
             onPress={pickOtapFile}
             disabled={otapRunning}
-            color="#8957e5"
+            color="#1f6d74"
           />
           {otapFileInfo && (
             <Text style={{fontSize: 11, color: '#8b949e'}}>
