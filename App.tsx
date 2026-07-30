@@ -321,11 +321,11 @@ function App(): React.JSX.Element {
   // ─── UI ──────────────────────────────────────────────────────────────────────
 
   return (
-    <SafeAreaView style={{flex: 1, backgroundColor: '#fff'}}>
-      <View style={{flex: 1, padding: 16}}>
+    <SafeAreaView style={{flex: 1, backgroundColor: '#121417'}}>
+      <View style={{flex: 1, paddingHorizontal: 16, paddingTop: 32, paddingBottom: 16}}>
 
         {/* Header */}
-        <Text style={{fontSize: 16, fontWeight: 'bold', marginBottom: 12}}>
+        <Text style={{fontSize: 16, fontWeight: 'bold', marginBottom: 12, color: '#e6edf3'}}>
           BLE — {TARGET_NAME}
         </Text>
 
@@ -336,6 +336,7 @@ function App(): React.JSX.Element {
               title={scanning ? 'Scanning...' : 'Scan'}
               onPress={scanDevices}
               disabled={scanning || isConnected}
+              color="#238636"
             />
           </View>
 
@@ -345,6 +346,7 @@ function App(): React.JSX.Element {
                 title={isConnecting ? 'Connecting...' : 'Connect'}
                 onPress={connectToDevice}
                 disabled={isConnecting}
+                color="#238636"
               />
             </View>
           )}
@@ -355,7 +357,7 @@ function App(): React.JSX.Element {
                 <Text style={{
                   textAlign: 'center',
                   color: 'white',
-                  backgroundColor: '#2e7d32',
+                  backgroundColor: '#238636',
                   padding: 8,
                   borderRadius: 4,
                 }}>
@@ -387,11 +389,12 @@ function App(): React.JSX.Element {
           marginBottom: 12,
           padding: 10,
           borderWidth: 1,
-          borderColor: '#ddd',
+          borderColor: '#30363d',
           borderRadius: 8,
+          backgroundColor: '#1c2128',
           gap: 6,
         }}>
-          <Text style={{fontSize: 12, fontWeight: 'bold', color: '#555', marginBottom: 2}}>
+          <Text style={{fontSize: 12, fontWeight: 'bold', color: '#8b949e', marginBottom: 2}}>
             OTAP FIRMWARE UPDATE
           </Text>
 
@@ -399,15 +402,17 @@ function App(): React.JSX.Element {
             title="1. Trigger OTA Mode (WU)"
             onPress={runOtapTrigger}
             disabled={otapRunning}
+            color="#8957e5"
           />
 
           <Button
             title="2. Pick Firmware File (.bleota)"
             onPress={pickOtapFile}
             disabled={otapRunning}
+            color="#8957e5"
           />
           {otapFileInfo && (
-            <Text style={{fontSize: 11, color: '#666'}}>
+            <Text style={{fontSize: 11, color: '#8b949e'}}>
               Loaded: {otapFileInfo.name} — imageId={otapFileInfo.imageId}, size={otapFileInfo.size} bytes
             </Text>
           )}
@@ -416,6 +421,7 @@ function App(): React.JSX.Element {
             title="3. Start Firmware Update (OTAP)"
             onPress={runOtapUpdate}
             disabled={otapRunning || !otapFileInfo}
+            color="#8957e5"
           />
 
           <Button
@@ -425,16 +431,16 @@ function App(): React.JSX.Element {
             color="#d97706"
           />
 
-          <View style={{height: 6, backgroundColor: '#eee', borderRadius: 3, overflow: 'hidden'}}>
-            <View style={{height: '100%', width: `${otapProgress}%`, backgroundColor: '#2563eb'}} />
+          <View style={{height: 6, backgroundColor: '#30363d', borderRadius: 3, overflow: 'hidden'}}>
+            <View style={{height: '100%', width: `${otapProgress}%`, backgroundColor: '#8957e5'}} />
           </View>
-          <Text style={{fontSize: 11, color: '#666'}}>{otapProgress}%</Text>
+          <Text style={{fontSize: 11, color: '#8b949e'}}>{otapProgress}%</Text>
         </View>
 
         {/* Log Panel (shared by both the scanner and OTAP flow) */}
         <View style={{
           flex: 1,
-          backgroundColor: '#0d0d0d',
+          backgroundColor: '#010409',
           borderRadius: 8,
           padding: 8,
         }}>
@@ -443,9 +449,9 @@ function App(): React.JSX.Element {
             justifyContent: 'space-between',
             marginBottom: 4,
           }}>
-            <Text style={{color: '#00ff88', fontSize: 11}}>LOG</Text>
+            <Text style={{color: '#3fb950', fontSize: 11}}>LOG</Text>
             <Text
-              style={{color: '#ff4444', fontSize: 11}}
+              style={{color: '#f85149', fontSize: 11}}
               onPress={clearLogs}>
               CLEAR
             </Text>
@@ -454,13 +460,13 @@ function App(): React.JSX.Element {
           <ScrollView ref={scrollRef} showsVerticalScrollIndicator={false}>
             {logs.map((line, i) => (
               <Text key={i} style={{
-                color: line.includes('ERROR')       ? '#ff4444'
-                     : line.includes('══')          ? '#00ff88'
+                color: line.includes('ERROR')       ? '#f85149'
+                     : line.includes('══')          ? '#3fb950'
                      : line.includes('◀ RX')        ? '#00cfff'
                      : line.includes('▶ TX')        ? '#ffcc00'
                      : line.includes('✅')          ? '#88ff88'
-                     : line.includes('🔔')          ? '#cc88ff'
-                     : '#cccccc',
+                     : line.includes('🔔')          ? '#a371f7'
+                     : '#8b949e',
                 fontSize: 10,
                 fontFamily: 'monospace',
                 marginBottom: 1,
