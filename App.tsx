@@ -306,6 +306,18 @@ function App(): React.JSX.Element {
     }
   };
 
+  // ─── OTAP: refresh/retry after a mid-transfer disconnect ────────────────────
+  // Reuses the same already-loaded firmware image and re-runs the update from
+  // scratch. The device tracks its own progress (per the OTAP spec, it can
+  // request any block position at any time), so reconnecting and letting it
+  // ask for whatever it still needs is the correct way to recover, rather than
+  // needing to re-pick the file.
+
+  const runOtapRefresh = async () => {
+    addLog('══ OTAP: REFRESHING UPDATE (retry after disconnect) ══');
+    await runOtapUpdate();
+  };
+
   // ─── UI ──────────────────────────────────────────────────────────────────────
 
   return (
@@ -405,6 +417,14 @@ function App(): React.JSX.Element {
             onPress={runOtapUpdate}
             disabled={otapRunning || !otapFileInfo}
           />
+
+          <Button
+            title="🔄 Refresh Update (retry after disconnect)"
+            onPress={runOtapRefresh}
+            disabled={otapRunning || !otapFileInfo}
+            color="#d97706"
+          />
+
           <View style={{height: 6, backgroundColor: '#eee', borderRadius: 3, overflow: 'hidden'}}>
             <View style={{height: '100%', width: `${otapProgress}%`, backgroundColor: '#2563eb'}} />
           </View>
