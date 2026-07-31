@@ -245,7 +245,22 @@ export class OtapServer {
     }
 
     this.log(`Connecting to ${device.name ?? device.id} ...`);
-    const connected = await device.connect();
+    let connected = await device.connect();
+
+    // Explicitly request a larger MTU. Without this, the connection can stay
+    // at BLE's unnegotiated default (ATT_MTU=23), which leaves only ~18 usable
+    // payload bytes per write - meaning a single 4608-byte block needs ~256
+    // separate writes instead of ~19. That's what was actually causing the
+    // mid-transfer disconnects: not writing too fast, but the transfer being
+    // artificially slowed down so much (by our own pacing delay, multiplied
+    // over hundreds of tiny writes) that the device timed out waiting for us.
+    try {
+      connected = await connected.requestMTU(247);
+      this.log(`Requested MTU 247, negotiated: ${connected.mtu}`);
+    } catch (err: any) {
+      this.log(`MTU request failed, continuing with default: ${err?.message}`);
+    }
+
     await connected.discoverAllServicesAndCharacteristics();
 
     // Check the Control Point's actual properties before subscribing, same
@@ -266,7 +281,16 @@ export class OtapServer {
     // correct and only way to enable this at this API level.
     this.log('Subscribing to notifications on Control Point ...');
     const commandQueue: Uint8Array[] = [];
-    let wake: (() => void) | null = null;
+    let wakeResolve: ((v: Uint8Array) => void) | null = null;
+    let wakeReject: ((e: Error) => void) | null = null;
+
+    const failPendingWait = (message: string) => {
+      if (wakeReject) {
+        wakeReject(new Error(message));
+        wakeResolve = null;
+        wakeReject = null;
+      }
+    };
 
     const subscription: Subscription = connected.monitorCharacteristicForService(
       SERVICE_OTAP,
@@ -274,22 +298,36 @@ export class OtapServer {
       (error, characteristic) => {
         if (error) {
           this.log(`Monitor error: ${error.message}`);
+          // Previously this just logged and returned, leaving any pending
+          // nextCommand() promise waiting forever - which is exactly why
+          // otapRunning never reset to false after a mid-transfer disconnect,
+          // permanently disabling the Refresh button. Now it actually fails
+          // the wait so the error propagates up and gets caught properly.
+          failPendingWait(`Monitor error (device likely disconnected): ${error.message}`);
           return;
         }
         if (characteristic?.value) {
           commandQueue.push(base64ToBytes(characteristic.value));
-          if (wake) {
-            wake();
-            wake = null;
+          if (wakeResolve) {
+            wakeResolve(commandQueue.shift()!);
+            wakeResolve = null;
+            wakeReject = null;
           }
         }
       },
     );
 
+    // Second safety net: some disconnects don't surface through the monitor
+    // callback's error path at all - this catches those too.
+    const disconnectSubscription = connected.onDisconnected(() => {
+      failPendingWait('Device disconnected during transfer');
+    });
+
     const nextCommand = (): Promise<Uint8Array> => {
       if (commandQueue.length > 0) return Promise.resolve(commandQueue.shift()!);
-      return new Promise((resolve) => {
-        wake = () => resolve(commandQueue.shift()!);
+      return new Promise((resolve, reject) => {
+        wakeResolve = resolve;
+        wakeReject = reject;
       });
     };
 
@@ -317,6 +355,7 @@ export class OtapServer {
           const ok = payload[3] === 0x00;
           this.log(`Transfer complete, status ${ok ? 'SUCCESS' : '0x' + payload[3].toString(16)}`);
           subscription.remove();
+          disconnectSubscription.remove();
           await connected.cancelConnection();
           return ok;
         } else if (cmd === CMD.ERROR_NOTIFICATION || cmd === CMD.STOP_IMAGE_TRANSFER) {
@@ -326,6 +365,7 @@ export class OtapServer {
       }
     } finally {
       subscription.remove();
+      disconnectSubscription.remove();
     }
   }
 
@@ -366,7 +406,7 @@ export class OtapServer {
       // causes a silent disconnect (no JS-catchable error) once the buffer
       // fills up - typically around the same data volume every time. This
       // small pause gives the radio time to actually drain each packet.
-      await new Promise((r) => setTimeout(r, 15));
+      await new Promise((r) => setTimeout(r, 5));
     }
     const pct = (100 * Math.min(this.totalSent, image.size)) / image.size;
     this.log(`  ${this.totalSent}/${image.size} bytes (${pct.toFixed(1)} %)`);
