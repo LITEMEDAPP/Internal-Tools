@@ -49,3 +49,5 @@ cd android
 cd ..
 
 npx react-native run-android
+
+.\gradlew.bat assembleRelease
