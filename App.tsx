@@ -1,3 +1,4 @@
+import { createUploadRecord, markUploadComplete, fetchUploads } from './api/uploadsApi';
 import React, {useEffect, useState, useRef} from 'react';
 import {
   PermissionsAndroid,
@@ -63,6 +64,11 @@ function App(): React.JSX.Element {
   const [otapProgress, setOtapProgress] = useState(0);
   const [otapRunning,  setOtapRunning]  = useState(false);
   const otapImageRef = useRef<OtapImage | null>(null);
+
+  // ---- PostgreSQL upload-log tracking (new) ----
+  // Holds the id of the firmware_uploads row created for the current/last update,
+  // so we know which row to mark uploaded=true when the transfer finishes.
+  const otapUploadRecordIdRef = useRef<number | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
   const connectedDeviceRef = useRef<Device | null>(null);
@@ -287,6 +293,21 @@ function App(): React.JSX.Element {
     setOtapRunning(true);
     setOtapProgress(0);
     addLog('══ OTAP: START FIRMWARE UPDATE ═══════');
+
+    // --- PostgreSQL: log the start of this upload attempt ---
+    try {
+      const fileName = otapFileInfo?.name ?? 'unknown.bleota';
+      const fileSize = otapFileInfo?.size ?? 0;
+      const record = await createUploadRecord(fileName, fileSize);
+      otapUploadRecordIdRef.current = record.id;
+      addLog(`DB: created upload record id=${record.id} for ${fileName}`);
+    } catch (dbErr: any) {
+      // Don't block the actual OTA transfer if the DB/network call fails —
+      // just log it and continue with the firmware update itself.
+      addLog(`DB ERROR (create record): ${dbErr?.message}`);
+      otapUploadRecordIdRef.current = null;
+    }
+
     try {
       const server = new OtapServer({
         manager,
@@ -299,6 +320,16 @@ function App(): React.JSX.Element {
       });
       const ok = await server.run();
       addLog(ok ? 'OTAP: update complete.' : 'OTAP: update failed.');
+
+      // --- PostgreSQL: mark the record uploaded=true only on success ---
+      if (ok && otapUploadRecordIdRef.current !== null) {
+        try {
+          await markUploadComplete(otapUploadRecordIdRef.current);
+          addLog(`DB: marked record id=${otapUploadRecordIdRef.current} as uploaded`);
+        } catch (dbErr: any) {
+          addLog(`DB ERROR (mark complete): ${dbErr?.message}`);
+        }
+      }
     } catch (err: any) {
       addLog(`OTAP ERROR : ${err?.message}`);
     } finally {
@@ -470,7 +501,7 @@ function App(): React.JSX.Element {
                      : line.includes('◀ RX')        ? '#00cfff'
                      : line.includes('▶ TX')        ? '#ffcc00'
                      : line.includes('✅')          ? '#88ff88'
-                     : line.includes('🔔')          ? '#a371f7'
+                     : line.includes('🔔')          ? '#a371f7' 
                      : '#8b949e',
                 fontSize: 10,
                 fontFamily: 'monospace',

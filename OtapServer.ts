@@ -240,7 +240,7 @@ export class OtapServer {
     this.log('Scanning for OTAP device ...');
     const device = await this.scanForDevice(SERVICE_OTAP, 30000);
     if (!device) {
-      this.log('No OTAP device found.');
+      this.log('No OTAP device found.'); 
       return false;
     }
 
