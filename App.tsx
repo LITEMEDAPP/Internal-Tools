@@ -17,10 +17,14 @@ import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, by
 
 const manager = new BleManager();
 
+// ─── TARGET DEVICES ─────────────────────────────────────────────────────────
+// Supports scanning for either of two known devices, matched by MAC or by
+// advertised name (matching on either one alone is enough).
 const TARGET_DEVICES = [
   { mac: '00:60:37:E2:85:4D', name: 'LMNP-0000000000' },
   { mac: '00:60:37:67:5A:C8', name: 'LMNP-9999999999' },
 ];
+
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
 const SubscribetoUUID = '01ff0101-ba5e-f4ee-5ca1-eb1e5e4b1ce0'
 
@@ -54,8 +58,6 @@ const timestamp = () => {
 };
 
 // ─── SPLASH SCREEN ──────────────────────────────────────────────────────────
-// Dark splash shown for at least SPLASH_MIN_DURATION_MS before the main app
-// UI renders. Uses the real CURAPOD logo image (place it at ./assets/curapod_logo.png).
 
 const SPLASH_MIN_DURATION_MS = 1000;
 
@@ -93,13 +95,13 @@ function MainApp(): React.JSX.Element {
   const [writableChars, setWritableChars] = useState<Characteristic[]>([]);
   const [logs,          setLogs]          = useState<string[]>([]);
 
-  // ---- OTAP-specific state (new, added alongside the existing scanner) ----
+  // ---- OTAP-specific state ----
   const [otapFileInfo, setOtapFileInfo] = useState<{name: string; imageId: number; size: number} | null>(null);
   const [otapProgress, setOtapProgress] = useState(0);
   const [otapRunning,  setOtapRunning]  = useState(false);
   const otapImageRef = useRef<OtapImage | null>(null);
 
-  // ---- PostgreSQL upload-log tracking (new) ----
+  // ---- PostgreSQL upload-log tracking ----
   const otapUploadRecordIdRef = useRef<number | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
@@ -129,8 +131,8 @@ function MainApp(): React.JSX.Element {
     setIsConnected(false);
     setWritableChars([]);
     setScanning(true);
-   addLog('══ SCAN STARTED ══════════════════════');
-   TARGET_DEVICES.forEach(d => addLog(`Target: ${d.name} (${d.mac})`));
+    addLog('══ SCAN STARTED ══════════════════════');
+    TARGET_DEVICES.forEach(d => addLog(`Target: ${d.name} (${d.mac})`));
 
     manager.startDeviceScan(null, null, (error, device) => {
       if (error) {
@@ -143,9 +145,11 @@ function MainApp(): React.JSX.Element {
         addLog(`SCAN → ${device.name ?? 'Unknown'} | ${device.id} | RSSI: ${device.rssi} dBm`);
       }
 
-      const matched = TARGET_DEVICES.some(d => device?.id === d.mac || device?.name === d.name);
+      const matched = TARGET_DEVICES.some(
+        d => device?.id === d.mac || device?.name === d.name
+      );
 
-      if (matchedByMac || matchedByName) {
+      if (matched) {
         addLog(`══ TARGET FOUND ══════════════════════`);
         addLog(`Name : ${device?.name}`);
         addLog(`MAC  : ${device?.id}`);
@@ -256,7 +260,6 @@ function MainApp(): React.JSX.Element {
     try {
       addLog('══ DISCONNECTING ══════════════════════');
       await connectedDeviceRef.current?.cancelConnection();
-      // onDisconnected() above handles resetting isConnected/writableChars/ref
     } catch (error: any) {
       addLog(`DISCONNECT ERROR : ${error.message}`);
     }
@@ -324,7 +327,6 @@ function MainApp(): React.JSX.Element {
     setOtapProgress(0);
     addLog('══ OTAP: START FIRMWARE UPDATE ═══════');
 
-    // --- PostgreSQL: log the start of this upload attempt ---
     try {
       const fileName = otapFileInfo?.name ?? 'unknown.bleota';
       const fileSize = otapFileInfo?.size ?? 0;
@@ -341,7 +343,7 @@ function MainApp(): React.JSX.Element {
       const server = new OtapServer({
         manager,
         image: otapImageRef.current,
-        useWirelessUart: false, // trigger is the separate manual step above
+        useWirelessUart: false,
         log: addLog,
         onProgress: (sent, total) => {
           setOtapProgress(total > 0 ? Math.round((sent * 100) / total) : 0);
@@ -443,7 +445,7 @@ function MainApp(): React.JSX.Element {
           </View>
         )}
 
-        {/* ── OTAP section (new, added alongside the existing scanner) ── */}
+        {/* OTAP section */}
         <View style={{
           marginBottom: 12,
           padding: 10,
@@ -496,7 +498,7 @@ function MainApp(): React.JSX.Element {
           <Text style={{fontSize: 11, color: '#8b949e'}}>{otapProgress}%</Text>
         </View>
 
-        {/* Log Panel (shared by both the scanner and OTAP flow) */}
+        {/* Log Panel */}
         <View style={{
           flex: 1,
           backgroundColor: '#010409',
