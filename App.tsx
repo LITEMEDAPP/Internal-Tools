@@ -8,6 +8,7 @@ import {
   Text,
   View,
   ScrollView,
+  Image,
 } from 'react-native';
 
 import {BleManager, Device, Characteristic} from 'react-native-ble-plx';
@@ -16,8 +17,10 @@ import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, by
 
 const manager = new BleManager();
 
-const TARGET_MAC  = '00:60:37:E2:85:4D';
-const TARGET_NAME = 'LMNP-0000000000';
+const TARGET_DEVICES = [
+  { mac: '00:60:37:E2:85:4D', name: 'LMNP-0000000000' },
+  { mac: '00:60:37:67:5A:C8', name: 'LMNP-9999999999' },
+];
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
 const SubscribetoUUID = '01ff0101-ba5e-f4ee-5ca1-eb1e5e4b1ce0'
 
@@ -50,7 +53,38 @@ const timestamp = () => {
   return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}.${d.getMilliseconds().toString().padStart(3,'0')}`;
 };
 
-function App(): React.JSX.Element {
+// ─── SPLASH SCREEN ──────────────────────────────────────────────────────────
+// Dark splash shown for at least SPLASH_MIN_DURATION_MS before the main app
+// UI renders. Uses the real CURAPOD logo image (place it at ./assets/curapod_logo.png).
+
+const SPLASH_MIN_DURATION_MS = 1000;
+
+function SplashScreen(): React.JSX.Element {
+  return (
+    <View style={{
+      flex: 1,
+      backgroundColor: '#121417',
+      justifyContent: 'center',
+      alignItems: 'center',
+    }}>
+      <Image
+        source={require('./assets/curapod_logo.png')}
+        style={{ width: 240, height: 60, resizeMode: 'contain' }}
+      />
+      <Text style={{
+        fontSize: 12,
+        letterSpacing: 3,
+        color: '#8957e5',
+        textTransform: 'uppercase',
+        marginTop: 10,
+      }}>
+        OTAP
+      </Text>
+    </View>
+  );
+}
+
+function MainApp(): React.JSX.Element {
 
   const [targetDevice,  setTargetDevice]  = useState<Device | null>(null);
   const [scanning,      setScanning]      = useState(false);
@@ -66,8 +100,6 @@ function App(): React.JSX.Element {
   const otapImageRef = useRef<OtapImage | null>(null);
 
   // ---- PostgreSQL upload-log tracking (new) ----
-  // Holds the id of the firmware_uploads row created for the current/last update,
-  // so we know which row to mark uploaded=true when the transfer finishes.
   const otapUploadRecordIdRef = useRef<number | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
@@ -97,9 +129,8 @@ function App(): React.JSX.Element {
     setIsConnected(false);
     setWritableChars([]);
     setScanning(true);
-    addLog('══ SCAN STARTED ══════════════════════');
-    addLog(`Target MAC  : ${TARGET_MAC}`);
-    addLog(`Target Name : ${TARGET_NAME}`);
+   addLog('══ SCAN STARTED ══════════════════════');
+   TARGET_DEVICES.forEach(d => addLog(`Target: ${d.name} (${d.mac})`));
 
     manager.startDeviceScan(null, null, (error, device) => {
       if (error) {
@@ -112,8 +143,7 @@ function App(): React.JSX.Element {
         addLog(`SCAN → ${device.name ?? 'Unknown'} | ${device.id} | RSSI: ${device.rssi} dBm`);
       }
 
-      const matchedByMac  = device?.id   === TARGET_MAC;
-      const matchedByName = device?.name === TARGET_NAME;
+      const matched = TARGET_DEVICES.some(d => device?.id === d.mac || device?.name === d.name);
 
       if (matchedByMac || matchedByName) {
         addLog(`══ TARGET FOUND ══════════════════════`);
@@ -298,12 +328,11 @@ function App(): React.JSX.Element {
     try {
       const fileName = otapFileInfo?.name ?? 'unknown.bleota';
       const fileSize = otapFileInfo?.size ?? 0;
-      const record = await createUploadRecord(fileName, fileSize);
+      const deviceUuid = connectedDeviceRef.current?.id;
+      const record = await createUploadRecord(fileName, fileSize, deviceUuid);
       otapUploadRecordIdRef.current = record.id;
       addLog(`DB: created upload record id=${record.id} for ${fileName}`);
     } catch (dbErr: any) {
-      // Don't block the actual OTA transfer if the DB/network call fails —
-      // just log it and continue with the firmware update itself.
       addLog(`DB ERROR (create record): ${dbErr?.message}`);
       otapUploadRecordIdRef.current = null;
     }
@@ -321,7 +350,6 @@ function App(): React.JSX.Element {
       const ok = await server.run();
       addLog(ok ? 'OTAP: update complete.' : 'OTAP: update failed.');
 
-      // --- PostgreSQL: mark the record uploaded=true only on success ---
       if (ok && otapUploadRecordIdRef.current !== null) {
         try {
           await markUploadComplete(otapUploadRecordIdRef.current);
@@ -338,11 +366,6 @@ function App(): React.JSX.Element {
   };
 
   // ─── OTAP: refresh/retry after a mid-transfer disconnect ────────────────────
-  // Reuses the same already-loaded firmware image and re-runs the update from
-  // scratch. The device tracks its own progress (per the OTAP spec, it can
-  // request any block position at any time), so reconnecting and letting it
-  // ask for whatever it still needs is the correct way to recover, rather than
-  // needing to re-pick the file.
 
   const runOtapRefresh = async () => {
     addLog('══ OTAP: REFRESHING UPDATE (retry after disconnect) ══');
@@ -516,6 +539,23 @@ function App(): React.JSX.Element {
       </View>
     </SafeAreaView>
   );
+}
+
+// ─── ROOT APP: shows splash for at least SPLASH_MIN_DURATION_MS, then MainApp ──
+
+function App(): React.JSX.Element {
+  const [showSplash, setShowSplash] = useState(true);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setShowSplash(false), SPLASH_MIN_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (showSplash) {
+    return <SplashScreen />;
+  }
+
+  return <MainApp />;
 }
 
 export default App;
