@@ -9,6 +9,7 @@ import {
   View,
   ScrollView,
   Image,
+  TouchableOpacity,
 } from 'react-native';
 
 import {BleManager, Device, Characteristic} from 'react-native-ble-plx';
@@ -17,13 +18,18 @@ import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, by
 
 const manager = new BleManager();
 
-// ─── TARGET DEVICES ─────────────────────────────────────────────────────────
-// Supports scanning for either of two known devices, matched by MAC or by
-// advertised name (matching on either one alone is enough).
+// ─── KNOWN TARGET DEVICES (quick-scan) ──────────────────────────────────────
 const TARGET_DEVICES = [
   { mac: '00:60:37:E2:85:4D', name: 'LMNP-0000000000' },
   { mac: '00:60:37:67:5A:C8', name: 'LMNP-9999999999' },
 ];
+
+// ─── GENERIC OTA DEVICE DETECTION (nearby-scan) ─────────────────────────────
+// Confirmed: the device actually advertises SERVICE_WU in its advertisement
+// packet, so we can filter the scan itself by that UUID directly - far more
+// reliable than matching on the display name, and only reports devices that
+// are genuinely broadcasting this service.
+const NEARBY_SCAN_DURATION_MS = 6000;
 
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
 const SubscribetoUUID = '01ff0101-ba5e-f4ee-5ca1-eb1e5e4b1ce0'
@@ -95,6 +101,11 @@ function MainApp(): React.JSX.Element {
   const [writableChars, setWritableChars] = useState<Characteristic[]>([]);
   const [logs,          setLogs]          = useState<string[]>([]);
 
+  // ---- Nearby OTA device discovery (new) ----
+  const [nearbyDevices,   setNearbyDevices]   = useState<Device[]>([]);
+  const [scanningNearby,  setScanningNearby]  = useState(false);
+  const nearbyDeviceIdsRef = useRef<Set<string>>(new Set());
+
   // ---- OTAP-specific state ----
   const [otapFileInfo, setOtapFileInfo] = useState<{name: string; imageId: number; size: number} | null>(null);
   const [otapProgress, setOtapProgress] = useState(0);
@@ -124,14 +135,14 @@ function MainApp(): React.JSX.Element {
 
   const clearLogs = () => setLogs([]);
 
-  // ─── SCAN ────────────────────────────────────────────────────────────────────
+  // ─── QUICK SCAN (known target devices) ──────────────────────────────────────
 
   const scanDevices = () => {
     setTargetDevice(null);
     setIsConnected(false);
     setWritableChars([]);
     setScanning(true);
-    addLog('══ SCAN STARTED ══════════════════════');
+    addLog('══ QUICK SCAN STARTED ════════════════');
     TARGET_DEVICES.forEach(d => addLog(`Target: ${d.name} (${d.mac})`));
 
     manager.startDeviceScan(null, null, (error, device) => {
@@ -168,12 +179,59 @@ function MainApp(): React.JSX.Element {
     }, 5000);
   };
 
+  // ─── NEARBY SCAN (any device matching the LMNP- name pattern) ───────────────
+  // Unlike scanDevices() above, this does not stop at the first match — it
+  // keeps listening for NEARBY_SCAN_DURATION_MS and collects every distinct
+  // OTA-capable device it sees, so the user can pick one from a list rather
+  // than needing to know its MAC/name ahead of time.
+
+  const scanNearbyOtaDevices = () => {
+    setNearbyDevices([]);
+    nearbyDeviceIdsRef.current = new Set();
+    setTargetDevice(null);
+    setIsConnected(false);
+    setWritableChars([]);
+    setScanningNearby(true);
+    addLog('══ NEARBY OTA SCAN STARTED ═══════════');
+    addLog(`Filtering by advertised Wireless UART service: ${SERVICE_WU}`);
+
+    // Passing SERVICE_WU as the scan filter means the OS only reports
+    // devices that actually advertise this service in their ad packet -
+    // confirmed to be genuinely broadcast by this hardware.
+    manager.startDeviceScan([SERVICE_WU], null, (error, device) => {
+      if (error) {
+        addLog(`NEARBY SCAN ERROR : ${error.message}`);
+        setScanningNearby(false);
+        return;
+      }
+
+      if (!device || nearbyDeviceIdsRef.current.has(device.id)) {
+        return; // no device data, or already collected this one
+      }
+
+      nearbyDeviceIdsRef.current.add(device.id);
+      addLog(`OTA DEVICE FOUND → ${device.name ?? 'Unknown'} | ${device.id} | RSSI: ${device.rssi} dBm`);
+      setNearbyDevices(prev => [...prev, device]);
+    });
+
+    setTimeout(() => {
+      manager.stopDeviceScan();
+      setScanningNearby(false);
+      addLog(`══ NEARBY SCAN COMPLETE (${nearbyDeviceIdsRef.current.size} found) ══`);
+    }, NEARBY_SCAN_DURATION_MS);
+  };
+
+  const selectNearbyDevice = (device: Device) => {
+    setTargetDevice(device);
+    addLog(`══ SELECTED: ${device.name} (${device.id}) ══`);
+  };
+
   // ─── CONNECT + DISCOVER ──────────────────────────────────────────────────────
 
   const connectToDevice = async () => {
     if (!targetDevice) return;
 
-    try {
+    try { 
       setIsConnecting(true);
       addLog('══ CONNECTING ════════════════════════');
       addLog(`Device : ${targetDevice.id}`);
@@ -391,12 +449,12 @@ function MainApp(): React.JSX.Element {
         </View>
 
         {/* Controls */}
-        <View style={{flexDirection: 'row', gap: 8, marginBottom: 12}}>
+        <View style={{flexDirection: 'row', gap: 8, marginBottom: 8}}>
           <View style={{flex: 1}}>
             <Button
-              title={scanning ? 'Scanning...' : 'Scan'}
+              title={scanning ? 'Scanning...' : 'Quick Scan'}
               onPress={scanDevices}
-              disabled={scanning || isConnected}
+              disabled={scanning || scanningNearby || isConnected}
               color="#338e45"
             />
           </View>
@@ -431,6 +489,54 @@ function MainApp(): React.JSX.Element {
             </>
           )}
         </View>
+
+        {/* Nearby OTA device scan */}
+        {!isConnected && (
+          <View style={{marginBottom: 12}}>
+            <Button
+              title={scanningNearby ? 'Scanning nearby...' : '📡 Scan Nearby OTA Devices'}
+              onPress={scanNearbyOtaDevices}
+              disabled={scanning || scanningNearby}
+              color="#1f6d74"
+            />
+
+            {nearbyDevices.length > 0 && (
+              <View style={{
+                marginTop: 8,
+                borderWidth: 1,
+                borderColor: '#30363d',
+                borderRadius: 8,
+                backgroundColor: '#1c2128',
+                padding: 8,
+                gap: 6,
+              }}>
+                <Text style={{fontSize: 11, color: '#8b949e', marginBottom: 2}}>
+                  {nearbyDevices.length} OTA device(s) found (by service UUID) — tap to select:
+                </Text>
+                {nearbyDevices.map(device => (
+                  <TouchableOpacity
+                    key={device.id}
+                    onPress={() => selectNearbyDevice(device)}
+                    style={{
+                      padding: 8,
+                      borderRadius: 6,
+                      backgroundColor: targetDevice?.id === device.id ? '#8957e5' : '#010409',
+                      borderWidth: 1,
+                      borderColor: targetDevice?.id === device.id ? '#8957e5' : '#30363d',
+                    }}
+                  >
+                    <Text style={{color: '#e6edf3', fontSize: 12, fontWeight: '600'}}>
+                      {device.name}
+                    </Text>
+                    <Text style={{color: '#8b949e', fontSize: 10}}>
+                      {device.id} · RSSI {device.rssi} dBm
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
 
         {/* Send Command buttons */}
         {writableChars.length > 0 && (
