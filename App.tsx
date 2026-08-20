@@ -14,7 +14,7 @@ import {
 
 import {BleManager, Device, Characteristic} from 'react-native-ble-plx';
 import {pick} from '@react-native-documents/picker';
-import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, bytesToBase64} from './OtapServer';
+import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, bytesToBase64, base64ToBytes} from './OtapServer';
 
 const manager = new BleManager();
 
@@ -25,14 +25,26 @@ const TARGET_DEVICES = [
 ];
 
 // ─── GENERIC OTA DEVICE DETECTION (nearby-scan) ─────────────────────────────
-// Confirmed: the device actually advertises SERVICE_WU in its advertisement
-// packet, so we can filter the scan itself by that UUID directly - far more
-// reliable than matching on the display name, and only reports devices that
-// are genuinely broadcasting this service.
+// The device is confirmed to advertise SERVICE_WU in its advertisement
+// packet. We scan unfiltered and match on EITHER signal - the advertised
+// SERVICE_WU UUID (when the OS surfaces it in device.serviceUUIDs) OR the
+// "LMNP-" name prefix - so a device is picked up even if one of those two
+// signals happens to be missing from a given advertisement packet.
+const OTA_DEVICE_NAME_PREFIX = 'LMNP-';
 const NEARBY_SCAN_DURATION_MS = 6000;
 
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
 const SubscribetoUUID = '01ff0101-ba5e-f4ee-5ca1-eb1e5e4b1ce0'
+
+// ─── HARDWARE COMPATIBILITY CHECK ────────────────────────────────────────────
+// Sent to CHAR_WU_WRITE right after connecting. The device responds (via
+// notify/indicate on the same characteristic) with a frame whose 5th byte
+// (index 4) encodes the hardware revision. OTA is only supported on hardware
+// revision 3 or higher.
+const HARDWARE_CHECK_CMD = new Uint8Array([0x24, 0x01, 0x15, 0xea, 0x00, 0x5f, 0x7c, 0x23]);
+const HARDWARE_REV_BYTE_INDEX = 4;
+const MIN_OTA_HARDWARE_REV = 3;
+const HARDWARE_CHECK_TIMEOUT_MS = 5000;
 
 async function requestPermissions() {
   if (Platform.OS === 'android') {
@@ -105,6 +117,15 @@ function MainApp(): React.JSX.Element {
   const [nearbyDevices,   setNearbyDevices]   = useState<Device[]>([]);
   const [scanningNearby,  setScanningNearby]  = useState(false);
   const nearbyDeviceIdsRef = useRef<Set<string>>(new Set());
+
+  // ---- Hardware compatibility check (new) ----
+  // Runs automatically right after connecting. 'idle' before any check has
+  // run, 'checking' while waiting for the device's response, then settles
+  // into 'compatible' / 'incompatible' / 'error'.
+  const [hardwareCheckStatus, setHardwareCheckStatus] = useState<
+    'idle' | 'checking' | 'compatible' | 'incompatible' | 'error'
+  >('idle');
+  const [hardwareRevision, setHardwareRevision] = useState<number | null>(null);
 
   // ---- OTAP-specific state ----
   const [otapFileInfo, setOtapFileInfo] = useState<{name: string; imageId: number; size: number} | null>(null);
@@ -193,12 +214,13 @@ function MainApp(): React.JSX.Element {
     setWritableChars([]);
     setScanningNearby(true);
     addLog('══ NEARBY OTA SCAN STARTED ═══════════');
-    addLog(`Filtering by advertised Wireless UART service: ${SERVICE_WU}`);
+    addLog(`Matching by name "${OTA_DEVICE_NAME_PREFIX}*" OR service UUID ${SERVICE_WU}`);
 
-    // Passing SERVICE_WU as the scan filter means the OS only reports
-    // devices that actually advertise this service in their ad packet -
-    // confirmed to be genuinely broadcast by this hardware.
-    manager.startDeviceScan([SERVICE_WU], null, (error, device) => {
+    // Scan unfiltered so we see every device's raw advertisement, then match
+    // on EITHER the SERVICE_WU UUID (when present in device.serviceUUIDs) or
+    // the LMNP- name prefix - covers cases where either signal alone might
+    // be missing from a particular advertisement packet.
+    manager.startDeviceScan(null, null, (error, device) => {
       if (error) {
         addLog(`NEARBY SCAN ERROR : ${error.message}`);
         setScanningNearby(false);
@@ -209,8 +231,17 @@ function MainApp(): React.JSX.Element {
         return; // no device data, or already collected this one
       }
 
+      const matchesName = !!device.name?.startsWith(OTA_DEVICE_NAME_PREFIX);
+      const matchesUuid = !!device.serviceUUIDs?.some(
+        u => u.toLowerCase() === SERVICE_WU.toLowerCase()
+      );
+
+      if (!matchesName && !matchesUuid) {
+        return; // doesn't match either signal, ignore
+      }
+
       nearbyDeviceIdsRef.current.add(device.id);
-      addLog(`OTA DEVICE FOUND → ${device.name ?? 'Unknown'} | ${device.id} | RSSI: ${device.rssi} dBm`);
+      addLog(`OTA DEVICE FOUND → ${device.name ?? 'Unknown'} | ${device.id} | RSSI: ${device.rssi} dBm | matched by: ${matchesName ? 'name' : ''}${matchesName && matchesUuid ? ' + ' : ''}${matchesUuid ? 'uuid' : ''}`);
       setNearbyDevices(prev => [...prev, device]);
     });
 
@@ -226,12 +257,94 @@ function MainApp(): React.JSX.Element {
     addLog(`══ SELECTED: ${device.name} (${device.id}) ══`);
   };
 
+  // ─── HARDWARE COMPATIBILITY CHECK ────────────────────────────────────────────
+  // Writes HARDWARE_CHECK_CMD to CHAR_WU_WRITE, then waits for the device's
+  // response on the same characteristic (via notify/indicate). The 5th byte
+  // (index 4) of the response encodes the hardware revision; OTA is only
+  // supported when that revision is 3 or higher.
+
+  const runHardwareCompatibilityCheck = async (device: Device) => {
+    setHardwareCheckStatus('checking');
+    setHardwareRevision(null);
+    addLog('══ HARDWARE CHECK STARTED ═════════════');
+
+    let subscription: any = null;
+
+    try {
+      const responseBytes: Uint8Array = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error('Timed out waiting for hardware check response'));
+        }, HARDWARE_CHECK_TIMEOUT_MS);
+
+        subscription = device.monitorCharacteristicForService(
+          SERVICE_WU,
+          CHAR_WU_WRITE,
+          (error, characteristic) => {
+            if (error) {
+              clearTimeout(timer);
+              reject(error);
+              return;
+            }
+            if (characteristic?.value) {
+              clearTimeout(timer);
+              resolve(base64ToBytes(characteristic.value));
+            }
+          },
+        );
+
+        device
+          .writeCharacteristicWithoutResponseForService(
+            SERVICE_WU,
+            CHAR_WU_WRITE,
+            bytesToBase64(HARDWARE_CHECK_CMD),
+          )
+          .then(() => {
+            addLog(
+              `Sent hardware check command: ${Array.from(HARDWARE_CHECK_CMD)
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join(' ')}`,
+            );
+          })
+          .catch(err => {
+            clearTimeout(timer);
+            reject(err);
+          });
+      });
+
+      addLog(
+        `Hardware check response: ${Array.from(responseBytes)
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join(' ')}`,
+      );
+
+      if (responseBytes.length <= HARDWARE_REV_BYTE_INDEX) {
+        throw new Error(`Response too short (${responseBytes.length} bytes) to read hardware revision`);
+      }
+
+      const revision = responseBytes[HARDWARE_REV_BYTE_INDEX];
+      setHardwareRevision(revision);
+
+      if (revision >= MIN_OTA_HARDWARE_REV) {
+        setHardwareCheckStatus('compatible');
+        addLog(`══ HARDWARE REV ${revision} — OTA SUPPORTED ══`);
+      } else {
+        setHardwareCheckStatus('incompatible');
+        addLog(`══ HARDWARE REV ${revision} — OTA NOT SUPPORTED (needs >= ${MIN_OTA_HARDWARE_REV}) ══`);
+      }
+    } catch (err: any) {
+      setHardwareCheckStatus('error');
+      addLog(`HARDWARE CHECK ERROR : ${err?.message}`);
+    } finally {
+      subscription?.remove();
+    }
+  };
+
   // ─── CONNECT + DISCOVER ──────────────────────────────────────────────────────
 
   const connectToDevice = async () => {
     if (!targetDevice) return;
 
-    try { 
+    try {
       setIsConnecting(true);
       addLog('══ CONNECTING ════════════════════════');
       addLog(`Device : ${targetDevice.id}`);
@@ -277,11 +390,18 @@ function MainApp(): React.JSX.Element {
       setIsConnected(true);
       setIsConnecting(false);
 
+      // Run the hardware compatibility check automatically, right after
+      // connecting - not awaited here so it doesn't delay the rest of the
+      // connect flow; it updates hardwareCheckStatus in the background.
+      runHardwareCompatibilityCheck(connected);
+
       connected.onDisconnected((error, device) => {
         addLog('══ DISCONNECTED ══════════════════════');
         if (error) addLog(`Reason : ${error.message}`);
         setIsConnected(false);
         setWritableChars([]);
+        setHardwareCheckStatus('idle');
+        setHardwareRevision(null);
         connectedDeviceRef.current = null;
       });
 
@@ -490,6 +610,27 @@ function MainApp(): React.JSX.Element {
           )}
         </View>
 
+        {/* Hardware compatibility check status */}
+        {isConnected && hardwareCheckStatus !== 'idle' && (
+          <View style={{
+            marginBottom: 12,
+            padding: 8,
+            borderRadius: 6,
+            backgroundColor:
+              hardwareCheckStatus === 'checking'      ? '#1c2128'
+              : hardwareCheckStatus === 'compatible'   ? '#238636'
+              : hardwareCheckStatus === 'incompatible' ? '#c62828'
+              : '#8b3a3a',
+          }}>
+            <Text style={{color: 'white', fontSize: 12, fontWeight: '600', textAlign: 'center'}}>
+              {hardwareCheckStatus === 'checking' && 'Checking device hardware...'}
+              {hardwareCheckStatus === 'compatible' && `✅ Hardware Rev ${hardwareRevision} — OTA Supported`}
+              {hardwareCheckStatus === 'incompatible' && `⛔ Hardware Rev ${hardwareRevision} — OTA Not Supported`}
+              {hardwareCheckStatus === 'error' && '⚠️ Hardware check failed'}
+            </Text>
+          </View>
+        )}
+
         {/* Nearby OTA device scan */}
         {!isConnected && (
           <View style={{marginBottom: 12}}>
@@ -587,9 +728,14 @@ function MainApp(): React.JSX.Element {
           <Button
             title="3. Start Firmware Update (OTAP)"
             onPress={runOtapUpdate}
-            disabled={otapRunning || !otapFileInfo}
+            disabled={otapRunning || !otapFileInfo || hardwareCheckStatus === 'incompatible'}
             color="#8957e5"
           />
+          {hardwareCheckStatus === 'incompatible' && (
+            <Text style={{fontSize: 10, color: '#f85149'}}>
+              Update disabled: this device's hardware revision does not support OTA.
+            </Text>
+          )}
 
           <Button
             title="🔄 Refresh Update (retry after disconnect)"
