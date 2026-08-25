@@ -31,6 +31,7 @@ const TARGET_DEVICES = [
 // "LMNP-" name prefix - so a device is picked up even if one of those two
 // signals happens to be missing from a given advertisement packet.
 const OTA_DEVICE_NAME_PREFIX = 'LMNP-';
+const OTA_DEVICE_NAME_PREFIX_2 = 'LMMP-';
 const NEARBY_SCAN_DURATION_MS = 6000;
 
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
@@ -214,7 +215,7 @@ function MainApp(): React.JSX.Element {
     setWritableChars([]);
     setScanningNearby(true);
     addLog('══ NEARBY OTA SCAN STARTED ═══════════');
-    addLog(`Matching by name "${OTA_DEVICE_NAME_PREFIX}*" OR service UUID ${SERVICE_WU}`);
+    addLog(`Matching by name "${OTA_DEVICE_NAME_PREFIX}*" or "${OTA_DEVICE_NAME_PREFIX_2}*" OR service UUID ${SERVICE_WU}`);
 
     // Scan unfiltered so we see every device's raw advertisement, then match
     // on EITHER the SERVICE_WU UUID (when present in device.serviceUUIDs) or
@@ -231,7 +232,10 @@ function MainApp(): React.JSX.Element {
         return; // no device data, or already collected this one
       }
 
-      const matchesName = !!device.name?.startsWith(OTA_DEVICE_NAME_PREFIX);
+      const matchesName = !!(
+        device.name?.startsWith(OTA_DEVICE_NAME_PREFIX) ||
+        device.name?.startsWith(OTA_DEVICE_NAME_PREFIX_2)
+      );
       const matchesUuid = !!device.serviceUUIDs?.some(
         u => u.toLowerCase() === SERVICE_WU.toLowerCase()
       );
@@ -570,15 +574,6 @@ function MainApp(): React.JSX.Element {
 
         {/* Controls */}
         <View style={{flexDirection: 'row', gap: 8, marginBottom: 8}}>
-          <View style={{flex: 1}}>
-            <Button
-              title={scanning ? 'Scanning...' : 'Quick Scan'}
-              onPress={scanDevices}
-              disabled={scanning || scanningNearby || isConnected}
-              color="#338e45"
-            />
-          </View>
-
           {targetDevice && !isConnected && (
             <View style={{flex: 1}}>
               <Button
@@ -638,7 +633,7 @@ function MainApp(): React.JSX.Element {
               title={scanningNearby ? 'Scanning nearby...' : '📡 Scan Nearby OTA Devices'}
               onPress={scanNearbyOtaDevices}
               disabled={scanning || scanningNearby}
-              color="#1f6d74"
+              color="#238636"
             />
 
             {nearbyDevices.length > 0 && (
@@ -676,19 +671,6 @@ function MainApp(): React.JSX.Element {
                 ))}
               </View>
             )}
-          </View>
-        )}
-
-        {/* Send Command buttons */}
-        {writableChars.length > 0 && (
-          <View style={{marginBottom: 12, gap: 6}}>
-            {writableChars.map((char, i) => (
-              <Button
-                key={char.uuid}
-                title={`Send Command → Char ${i + 1} [${char.uuid.slice(0,8)}...]`}
-                onPress={() => sendCommand(char)}
-              />
-            ))}
           </View>
         )}
 
@@ -740,7 +722,7 @@ function MainApp(): React.JSX.Element {
           <Button
             title="🔄 Refresh Update (retry after disconnect)"
             onPress={runOtapRefresh}
-            disabled={otapRunning || !otapFileInfo}
+            disabled={otapRunning || !otapFileInfo}  
             color="#d97706"
           />
 
