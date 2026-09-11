@@ -19,11 +19,6 @@ import {OtapImage, OtapServer, SERVICE_WU, CHAR_WU_WRITE, WU_OTA_TRIGGER_CMD, by
 
 const manager = new BleManager();
 
-// ─── KNOWN TARGET DEVICES (quick-scan) ──────────────────────────────────────
-const TARGET_DEVICES = [
-  { mac: '00:60:37:E2:85:4D', name: 'LMNP-0000000000' },
-  { mac: '00:60:37:67:5A:C8', name: 'LMNP-9999999999' },
-];
 
 // ─── GENERIC OTA DEVICE DETECTION (nearby-scan) ─────────────────────────────
 // The device is confirmed to advertise SERVICE_WU in its advertisement
