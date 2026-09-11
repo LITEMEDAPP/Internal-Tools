@@ -10,6 +10,7 @@ import {
   ScrollView,
   Image,
   TouchableOpacity,
+  Alert,
 } from 'react-native';
 
 import {BleManager, Device, Characteristic} from 'react-native-ble-plx';
@@ -37,15 +38,40 @@ const NEARBY_SCAN_DURATION_MS = 6000;
 const COMMAND_HEX = '24 01 09 F6 00 96 7A 23';
 const SubscribetoUUID = '01ff0101-ba5e-f4ee-5ca1-eb1e5e4b1ce0'
 
+// Ping command sent to CHAR_WU_WRITE on the currently connected device.
+// Fire-and-forget - no response is awaited.
+const PING_CMD = new Uint8Array([0x24, 0x01, 0x09, 0xf6, 0x00, 0x96, 0x7a, 0x23, 0x0d, 0x0a]);
+
 // ─── HARDWARE COMPATIBILITY CHECK ────────────────────────────────────────────
 // Sent to CHAR_WU_WRITE right after connecting. The device responds (via
-// notify/indicate on the same characteristic) with a frame whose 5th byte
-// (index 4) encodes the hardware revision. OTA is only supported on hardware
-// revision 3 or higher.
+// notify/indicate on the same characteristic) with a frame whose byte at
+// index 4 is the major version and byte at index 5 is the minor version
+// (e.g. 03 00 = version "3.0"). The minimum required version differs by
+// device family:
+//   - LMNP devices require at least version 3.0
+//   - LMMP devices require at least version 1.3
 const HARDWARE_CHECK_CMD = new Uint8Array([0x24, 0x01, 0x15, 0xea, 0x00, 0x5f, 0x7c, 0x23]);
-const HARDWARE_REV_BYTE_INDEX = 4;
-const MIN_OTA_HARDWARE_REV = 3;
+const HARDWARE_MAJOR_BYTE_INDEX = 4;
+const HARDWARE_MINOR_BYTE_INDEX = 5;
 const HARDWARE_CHECK_TIMEOUT_MS = 5000;
+
+interface VersionThreshold { major: number; minor: number; }
+const MIN_VERSION_LMNP: VersionThreshold = { major: 3, minor: 0 };
+const MIN_VERSION_LMMP: VersionThreshold = { major: 1, minor: 0 };
+
+/** Picks the correct minimum-version threshold based on the device's advertised name. */
+function getMinVersionForDevice(deviceName?: string | null): VersionThreshold {
+  if (deviceName?.startsWith(OTA_DEVICE_NAME_PREFIX_2)) {
+    return MIN_VERSION_LMMP; // "LMMP-"
+  }
+  return MIN_VERSION_LMNP; // "LMNP-" and default fallback
+}
+
+/** True if (major.minor) >= (reqMajor.reqMinor). */
+function meetsMinVersion(major: number, minor: number, req: VersionThreshold): boolean {
+  if (major !== req.major) return major > req.major;
+  return minor >= req.minor;
+}
 
 async function requestPermissions() {
   if (Platform.OS === 'android') {
@@ -126,7 +152,7 @@ function MainApp(): React.JSX.Element {
   const [hardwareCheckStatus, setHardwareCheckStatus] = useState<
     'idle' | 'checking' | 'compatible' | 'incompatible' | 'error'
   >('idle');
-  const [hardwareRevision, setHardwareRevision] = useState<number | null>(null);
+  const [hardwareVersionLabel, setHardwareVersionLabel] = useState<string | null>(null);
 
   // ---- OTAP-specific state ----
   const [otapFileInfo, setOtapFileInfo] = useState<{name: string; imageId: number; size: number} | null>(null);
@@ -269,7 +295,7 @@ function MainApp(): React.JSX.Element {
 
   const runHardwareCompatibilityCheck = async (device: Device) => {
     setHardwareCheckStatus('checking');
-    setHardwareRevision(null);
+    setHardwareVersionLabel(null);
     addLog('══ HARDWARE CHECK STARTED ═════════════');
 
     let subscription: any = null;
@@ -321,19 +347,24 @@ function MainApp(): React.JSX.Element {
           .join(' ')}`,
       );
 
-      if (responseBytes.length <= HARDWARE_REV_BYTE_INDEX) {
-        throw new Error(`Response too short (${responseBytes.length} bytes) to read hardware revision`);
+      if (responseBytes.length <= HARDWARE_MINOR_BYTE_INDEX) {
+        throw new Error(`Response too short (${responseBytes.length} bytes) to read hardware version`);
       }
 
-      const revision = responseBytes[HARDWARE_REV_BYTE_INDEX];
-      setHardwareRevision(revision);
+      const major = responseBytes[HARDWARE_MAJOR_BYTE_INDEX];
+      const minor = responseBytes[HARDWARE_MINOR_BYTE_INDEX];
+      const versionLabel = `${major}.${minor}`;
+      setHardwareVersionLabel(versionLabel);
 
-      if (revision >= MIN_OTA_HARDWARE_REV) {
+      const requiredVersion = getMinVersionForDevice(device.name);
+      const requiredLabel = `${requiredVersion.major}.${requiredVersion.minor}`;
+
+      if (meetsMinVersion(major, minor, requiredVersion)) {
         setHardwareCheckStatus('compatible');
-        addLog(`══ HARDWARE REV ${revision} — OTA SUPPORTED ══`);
+        addLog(`══ HARDWARE VERSION ${versionLabel} — OTA SUPPORTED (needs >= ${requiredLabel}) ══`);
       } else {
         setHardwareCheckStatus('incompatible');
-        addLog(`══ HARDWARE REV ${revision} — OTA NOT SUPPORTED (needs >= ${MIN_OTA_HARDWARE_REV}) ══`);
+        addLog(`══ HARDWARE VERSION ${versionLabel} — OTA NOT SUPPORTED (needs >= ${requiredLabel}) ══`);
       }
     } catch (err: any) {
       setHardwareCheckStatus('error');
@@ -405,7 +436,7 @@ function MainApp(): React.JSX.Element {
         setIsConnected(false);
         setWritableChars([]);
         setHardwareCheckStatus('idle');
-        setHardwareRevision(null);
+        setHardwareVersionLabel(null);
         connectedDeviceRef.current = null;
       });
 
@@ -444,6 +475,32 @@ function MainApp(): React.JSX.Element {
       await connectedDeviceRef.current?.cancelConnection();
     } catch (error: any) {
       addLog(`DISCONNECT ERROR : ${error.message}`);
+    }
+  };
+
+  // ─── PING ────────────────────────────────────────────────────────────────────
+  // Fire-and-forget: writes PING_CMD to CHAR_WU_WRITE on whichever device is
+  // currently connected. No response is awaited or logged.
+
+  const runPing = async () => {
+    const device = connectedDeviceRef.current;
+    if (!device) {
+      addLog('PING: not connected - connect to a device first.');
+      return;
+    }
+    try {
+      await device.writeCharacteristicWithoutResponseForService(
+        SERVICE_WU,
+        CHAR_WU_WRITE,
+        bytesToBase64(PING_CMD),
+      );
+      addLog(
+        `PING sent → ${Array.from(PING_CMD)
+          .map(b => b.toString(16).padStart(2, '0'))
+          .join(' ')}`,
+      );
+    } catch (err: any) {
+      addLog(`PING ERROR : ${err?.message}`);
     }
   };
 
@@ -534,6 +591,14 @@ function MainApp(): React.JSX.Element {
       const ok = await server.run();
       addLog(ok ? 'OTAP: update complete.' : 'OTAP: update failed.');
 
+      // Pop up a clear success/failure alert to the user right after the
+      // transfer finishes, in addition to the log line above.
+      if (ok) {
+        Alert.alert('OTA Successful', 'The firmware update completed successfully.');
+      } else {
+        Alert.alert('Failed', 'The firmware update did not complete successfully.');
+      }
+
       if (ok && otapUploadRecordIdRef.current !== null) {
         try {
           await markUploadComplete(otapUploadRecordIdRef.current);
@@ -544,6 +609,7 @@ function MainApp(): React.JSX.Element {
       }
     } catch (err: any) {
       addLog(`OTAP ERROR : ${err?.message}`);
+      Alert.alert('Failed', `The firmware update failed: ${err?.message}`);
     } finally {
       setOtapRunning(false);
     }
@@ -599,6 +665,9 @@ function MainApp(): React.JSX.Element {
                 </Text>
               </View>
               <View style={{flex: 1}}>
+                <Button title="Ping" onPress={runPing} color="#1f6d74" />
+              </View>
+              <View style={{flex: 1}}>
                 <Button title="Disconnect" onPress={disconnectDevice} color="#c62828" />
               </View>
             </>
@@ -619,8 +688,8 @@ function MainApp(): React.JSX.Element {
           }}>
             <Text style={{color: 'white', fontSize: 12, fontWeight: '600', textAlign: 'center'}}>
               {hardwareCheckStatus === 'checking' && 'Checking device hardware...'}
-              {hardwareCheckStatus === 'compatible' && `✅ Hardware Rev ${hardwareRevision} — OTA Supported`}
-              {hardwareCheckStatus === 'incompatible' && `⛔ Hardware Rev ${hardwareRevision} — OTA Not Supported`}
+              {hardwareCheckStatus === 'compatible' && `✅ Hardware v${hardwareVersionLabel} — OTA Supported`}
+              {hardwareCheckStatus === 'incompatible' && `⛔ Hardware v${hardwareVersionLabel} — OTA Not Supported`}
               {hardwareCheckStatus === 'error' && '⚠️ Hardware check failed'}
             </Text>
           </View>
@@ -722,7 +791,7 @@ function MainApp(): React.JSX.Element {
           <Button
             title="🔄 Refresh Update (retry after disconnect)"
             onPress={runOtapRefresh}
-            disabled={otapRunning || !otapFileInfo}  
+            disabled={otapRunning || !otapFileInfo}
             color="#d97706"
           />
 
