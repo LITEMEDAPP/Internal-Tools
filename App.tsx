@@ -250,7 +250,7 @@ function MainApp(): React.JSX.Element {
       }
 
       if (!device || nearbyDeviceIdsRef.current.has(device.id)) {
-        return; // no device data, or already collected this one
+        return; 
       }
 
       const matchesName = !!(
@@ -262,7 +262,7 @@ function MainApp(): React.JSX.Element {
       );
 
       if (!matchesName && !matchesUuid) {
-        return; // doesn't match either signal, ignore
+        return; 
       }
 
       nearbyDeviceIdsRef.current.add(device.id);
@@ -420,9 +420,7 @@ function MainApp(): React.JSX.Element {
       setIsConnected(true);
       setIsConnecting(false);
 
-      // Run the hardware compatibility check automatically, right after
-      // connecting - not awaited here so it doesn't delay the rest of the
-      // connect flow; it updates hardwareCheckStatus in the background.
+      
       runHardwareCompatibilityCheck(connected);
 
       connected.onDisconnected((error, device) => {
@@ -474,8 +472,7 @@ function MainApp(): React.JSX.Element {
   };
 
   // ─── PING ────────────────────────────────────────────────────────────────────
-  // Fire-and-forget: writes PING_CMD to CHAR_WU_WRITE on whichever device is
-  // currently connected. No response is awaited or logged.
+
 
   const runPing = async () => {
     const device = connectedDeviceRef.current;
@@ -586,8 +583,7 @@ function MainApp(): React.JSX.Element {
       const ok = await server.run();
       addLog(ok ? 'OTAP: update complete.' : 'OTAP: update failed.');
 
-      // Pop up a clear success/failure alert to the user right after the
-      // transfer finishes, in addition to the log line above.
+      // Pop up a clear success/failure 
       if (ok) {
         Alert.alert('OTA Successful', 'The firmware update completed successfully.');
       } else {
@@ -610,7 +606,6 @@ function MainApp(): React.JSX.Element {
     }
   };
 
-  // ─── OTAP: refresh/retry after a mid-transfer disconnect ────────────────────
 
   const runOtapRefresh = async () => {
     addLog('══ OTAP: REFRESHING UPDATE (retry after disconnect) ══');
